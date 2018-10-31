@@ -50,6 +50,7 @@ func NewLogger(N int, ctrlc func()) (Logger, error) {
 		exit:   ctrlc,
 		input:  make(chan workerMsg, 10),
 		worker: make([]*reporter, N+1),
+		quit:   make(chan struct{}),
 	}
 	if mode == termbox.Output256 {
 		t.col256 = true
@@ -85,6 +86,9 @@ type terminal struct {
 	input  chan workerMsg
 	worker []*reporter // One per worker, and one for reporting progress at the bottom of the screen
 	exit   func()      // A function that's called when ctrl-c is pressed.
+
+	quit     chan struct{}  // closed when terminal.Close() is called.
+	waitDone sync.WaitGroup // used to signal when worker goroutines are closing down
 }
 
 // coloredLine is one line of output on one worker's terminal
@@ -131,10 +135,21 @@ func (t *terminal) readInput() {
 		// We use Interrupt() to signal the redrawing code to take another look
 		termbox.Interrupt()
 	}
+	fmt.Println("readInput Done")
+	t.waitDone.Done()
 }
 
 // Close shuts down the terminal, returning the original underlying terminal.
 func (t *terminal) Close() {
+	t.waitDone.Add(1)
+	close(t.input) // signal readInput to close
+	t.waitDone.Wait()
+
+	t.waitDone.Add(1)
+	close(t.quit)       // signal workers to close
+	termbox.Interrupt() // make sure run() gets triggered.
+	t.waitDone.Wait()
+
 	termbox.Close()
 }
 
@@ -226,6 +241,13 @@ func (t *terminal) run() {
 			setBG = true
 			fallthrough
 		case termbox.EventInterrupt:
+			select {
+			case <-t.quit:
+				fmt.Printf("run() done")
+				t.waitDone.Done()
+				return
+			default:
+			}
 			cols, rows := 1, len(t.worker)-1
 			for c := 1; c < len(t.worker)-1; c++ {
 				if t.w/c < 50 {
